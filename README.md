@@ -15,6 +15,10 @@
 
 **vision-language-model · speech-to-text · text-to-speech — three local AI models, one seamless voice loop**
 
+<img src="Docs/demo.gif" width="300" alt="Local Vision demo — asking the camera a question and getting a spoken answer, fully on-device" />
+
+*[▶ Full-quality demo video](Docs/demo.mp4)*
+
 </div>
 
 ---
