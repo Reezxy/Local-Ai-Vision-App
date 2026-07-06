@@ -1,0 +1,16 @@
+# Xcode / build
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.log
+
+# XcodeGen output (regenerate with `xcodegen generate`)
+LocalVision.xcodeproj/
+
+# SwiftPM
+.swiftpm/
+.build/
+
+# macOS
+.DS_Store

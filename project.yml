@@ -1,0 +1,84 @@
+name: LocalVision
+options:
+  bundleIdPrefix: com.localvision
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: "" # <- set your Apple Developer Team ID
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+packages:
+
+  MLXSwiftExamples:
+    url: https://github.com/ml-explore/mlx-swift-examples.git
+    exactVersion: "2.29.1"
+
+  MLXSwift:
+    url: https://github.com/ml-explore/mlx-swift.git
+    from: "0.29.1"
+
+  SwiftWhisper:
+    url: https://github.com/exPHAT/SwiftWhisper.git
+    branch: master
+  # Used to unzip Whisper's CoreML encoder (.mlmodelc.zip) on first run.
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation.git
+    from: "0.9.0"
+
+
+targets:
+  LocalVision:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    
+      - path: Vendor
+      - path: Resources
+    dependencies:
+      - package: MLXSwiftExamples
+        product: MLXLLM
+      - package: MLXSwiftExamples
+        product: MLXVLM
+      - package: MLXSwiftExamples
+        product: MLXLMCommon
+      - package: SwiftWhisper
+      - package: ZIPFoundation
+      - package: MLXSwift
+        product: MLXFFT
+    entitlements:
+      path: Resources/LocalVision.entitlements
+      properties:
+        # Lets the app request a higher memory ceiling so the 2B vision model
+        # can load on 4–6 GB iPhones without being jetsam-killed.
+        com.apple.developer.kernel.increased-memory-limit: true
+    info:
+      path: Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Local Vision
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        NSCameraUsageDescription: Local Vision uses the camera to see what you point it at and answer questions about it.
+        NSMicrophoneUsageDescription: Local Vision listens to your spoken questions and transcribes them on-device.
+        NSSpeechRecognitionUsageDescription: Local Vision transcribes your speech locally to understand your questions.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIStatusBarStyle: UIStatusBarStyleLightContent
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: NO
+        PRODUCT_BUNDLE_IDENTIFIER: com.localvision.app
+        TARGETED_DEVICE_FAMILY: "1" # iPhone
+        SUPPORTS_MACCATALYST: NO
+        # Xcode 16+ splits a separate "debug dylib" from the main binary, which
+        # makes statically-linked SwiftPM products (MLXNN etc.) appear twice and
+        # print "Class is implemented in both …" — a real hazard for MLX's
+        # reflection-based weight loading. Disabling it keeps one copy.
+        ENABLE_DEBUG_DYLIB: NO
