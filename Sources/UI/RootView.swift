@@ -94,6 +94,15 @@ struct RootView: View {
             GlowBorderView()
         }
         .animation(.easeInOut(duration: 0.25), value: pipeline.phase)
+        .overlay(alignment: .top) {
+            Text("made by Reezxy")
+                .font(.system(size: 12, weight: .medium))
+                .tracking(1.2)
+                .foregroundStyle(.white.opacity(0.35))
+                .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
+                .padding(.top, 12)
+                .allowsHitTesting(false)
+        }
         .overlay(alignment: .topLeading) {
             Button { showModels = true } label: {
                 Image(systemName: "gearshape.fill")

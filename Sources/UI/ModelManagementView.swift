@@ -20,6 +20,16 @@ struct ModelManagementView: View {
                 } footer: {
                     Text("Everything runs fully on-device. Deleting a model frees storage; it re-downloads the next time it's needed.")
                 }
+
+                Section {
+                    Text("made by Reezxy")
+                        .font(.system(size: 12, weight: .medium))
+                        .tracking(1.2)
+                        .foregroundStyle(.secondary.opacity(0.6))
+                        .frame(maxWidth: .infinity)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                }
             }
             .navigationTitle("Models")
             .navigationBarTitleDisplayMode(.inline)
