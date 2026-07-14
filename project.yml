@@ -23,6 +23,14 @@ packages:
     url: https://github.com/ml-explore/mlx-swift.git
     from: "0.29.1"
 
+  # HubApi, to control WHERE models are downloaded. MLX's `defaultHubApi` points
+  # at Library/Caches, which iOS purges under storage pressure — models would
+  # vanish behind the app's back. Pinned to the version mlx-swift-examples 2.29.1
+  # already resolves, so the graph stays at one copy.
+  SwiftTransformers:
+    url: https://github.com/huggingface/swift-transformers.git
+    exactVersion: "1.0.0"
+
   SwiftWhisper:
     url: https://github.com/exPHAT/SwiftWhisper.git
     branch: master
@@ -52,6 +60,8 @@ targets:
       - package: ZIPFoundation
       - package: MLXSwift
         product: MLXFFT
+      - package: SwiftTransformers
+        product: Hub
     entitlements:
       path: Resources/LocalVision.entitlements
       properties:

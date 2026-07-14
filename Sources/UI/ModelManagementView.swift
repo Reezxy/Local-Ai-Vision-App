@@ -9,6 +9,7 @@ struct ModelManagementView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var downloaded: [UUID: Bool] = [:]
     @State private var busy: Set<UUID> = []
+    @State private var failures: [UUID: String] = [:]
 
     var body: some View {
         NavigationStack {
@@ -60,10 +61,19 @@ struct ModelManagementView: View {
             Text(model.source)
                 .font(.caption2).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
 
+            if let failure = failures[model.id] {
+                Text(failure)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+
             HStack {
                 if isDownloaded {
                     Label("Downloaded", systemImage: "checkmark.circle.fill")
                         .font(.caption).foregroundStyle(.green)
+                } else if isBusy {
+                    Label("Downloading…", systemImage: "arrow.down.circle")
+                        .font(.caption).foregroundStyle(.secondary)
                 } else {
                     Label("Not downloaded", systemImage: "circle.dashed")
                         .font(.caption).foregroundStyle(.secondary)
@@ -80,7 +90,10 @@ struct ModelManagementView: View {
                     .buttonStyle(.bordered).controlSize(.small)
                 } else {
                     Button { download(model) } label: {
-                        Label("Download", systemImage: "arrow.down.circle")
+                        Label(
+                            failures[model.id] == nil ? "Download" : "Retry",
+                            systemImage: "arrow.down.circle"
+                        )
                     }
                     .buttonStyle(.borderedProminent).controlSize(.small)
                 }
@@ -99,8 +112,13 @@ struct ModelManagementView: View {
 
     private func download(_ model: ModelDescriptor) {
         busy.insert(model.id)
+        failures[model.id] = nil
         Task {
-            try? await model.service.prepare()
+            do {
+                try await model.service.prepare()
+            } catch {
+                failures[model.id] = error.localizedDescription
+            }
             downloaded[model.id] = await model.service.isDownloaded()
             busy.remove(model.id)
         }
@@ -108,9 +126,11 @@ struct ModelManagementView: View {
 
     private func delete(_ model: ModelDescriptor) {
         busy.insert(model.id)
+        failures[model.id] = nil
         Task {
             await model.service.deleteDownload()
-            // Re-show the first-run setup flow so a required model is re-fetched.
+            // The model is re-fetched on demand (or by the setup page on the next
+            // launch, which checks the disk rather than a "setup done" flag).
             ModelSetupCoordinator.hasCompletedSetup = false
             downloaded[model.id] = await model.service.isDownloaded()
             busy.remove(model.id)

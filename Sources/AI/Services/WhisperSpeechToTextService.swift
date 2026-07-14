@@ -21,6 +21,8 @@ actor WhisperSpeechToTextService: SpeechToTextService {
 
     private var whisper: Whisper?
     private var state: ModelLoadState = .notLoaded
+    /// Shared by concurrent `prepare()` callers so the model is only loaded once.
+    private var loadTask: Task<Void, Error>?
 
     init(modelFilename: String = "ggml-base.en.bin") {
         self.modelFilename = modelFilename
@@ -37,7 +39,18 @@ actor WhisperSpeechToTextService: SpeechToTextService {
     var loadState: ModelLoadState { state }
 
     func prepare() async throws {
-        guard whisper == nil else { return }
+        if whisper != nil { return }
+        if let loadTask {
+            try await loadTask.value
+            return
+        }
+        let task = Task<Void, Error> { try await self.load() }
+        loadTask = task
+        defer { loadTask = nil }
+        try await task.value
+    }
+
+    private func load() async throws {
         do {
             let url = try await ModelDownloader.shared.fileURL(
                 filename: modelFilename,
@@ -61,7 +74,30 @@ actor WhisperSpeechToTextService: SpeechToTextService {
             }
 
             state = .loading
-            whisper = Whisper(fromFileURL: url)
+
+            // SwiftWhisper defaults to `.auto` language detection, which costs a
+            // detection pass and can mis-fire on short questions — this is an
+            // English-only model, so say so. `no_context` keeps each question
+            // independent (the previous question is not a prompt for this one,
+            // and carrying it over invents words that were never said).
+            let params = WhisperParams(strategy: .greedy)
+            params.language = .english
+            params.translate = false
+            params.no_context = true
+            params.suppress_blank = true
+            params.print_progress = false
+            params.print_realtime = false
+            params.print_special = false
+            params.n_threads = Int32(max(2, min(6, ProcessInfo.processInfo.activeProcessorCount - 2)))
+
+            let whisper = Whisper(fromFileURL: url, withParams: params)
+            self.whisper = whisper
+
+            // First transcription pays for loading the CoreML encoder onto the
+            // Neural Engine (seconds). Do it now on a scrap of silence so the
+            // user's first real question isn't the one that waits.
+            _ = try? await Self.runTranscription(WhisperBox(whisper), [Float](repeating: 0, count: 16_000))
+
             state = .ready
         } catch {
             state = .failed(error.localizedDescription)
@@ -88,11 +124,18 @@ actor WhisperSpeechToTextService: SpeechToTextService {
 
     private func setState(_ newState: ModelLoadState) { state = newState }
 
+    /// Both pieces must be present: the weights *and* the CoreML encoder bundle.
+    /// Reporting "downloaded" with only the .bin made the app skip setup and then
+    /// re-download the encoder at the worst possible moment (first question).
     func isDownloaded() async -> Bool {
-        await ModelDownloader.shared.exists(modelFilename)
+        let hasWeights = await ModelDownloader.shared.exists(modelFilename)
+        let hasEncoder = await ModelDownloader.shared.exists("\(modelStem)-encoder.mlmodelc")
+        return hasWeights && hasEncoder
     }
 
     func deleteDownload() async {
+        loadTask?.cancel()
+        loadTask = nil
         whisper = nil
         state = .notLoaded
         await ModelDownloader.shared.delete(modelFilename)

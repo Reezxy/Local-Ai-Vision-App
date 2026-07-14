@@ -21,11 +21,23 @@ final class ModelSetupCoordinator {
     private let models: [ModelDescriptor]
     private var started = false
 
-    /// Persisted so we skip the setup page on later launches.
+    /// Persisted so we skip the setup page on later launches. It's only a hint:
+    /// the disk is the truth (see `allModelsPresent`). Files can go missing
+    /// between launches — a user deletes a model, or a download that once looked
+    /// finished turns out to be incomplete — and trusting this flag alone is how
+    /// the app ended up in the camera with a model it couldn't load.
     private static let completedKey = "modelsSetupCompleted"
     static var hasCompletedSetup: Bool {
         get { UserDefaults.standard.bool(forKey: completedKey) }
         set { UserDefaults.standard.set(newValue, forKey: completedKey) }
+    }
+
+    /// Whether every model's files are really on disk, complete, right now.
+    static func allModelsPresent(_ models: [ModelDescriptor]) async -> Bool {
+        for model in models {
+            if await model.service.isDownloaded() == false { return false }
+        }
+        return true
     }
 
     init(models: [ModelDescriptor]) {
@@ -65,28 +77,38 @@ final class ModelSetupCoordinator {
         items[index].state = .downloading(progress: 0)
 
         Task {
-            // Retry transient failures automatically so the user rarely has to
-            // tap "Retry" (flaky networks drop the first big download often).
-            for attempt in 0..<3 {
-                let prepare = Task.detached { try? await service.prepare() }
-                while true {
-                    let state = await service.loadState
-                    apply(state, at: index)
-                    if state.isReady { break }
-                    if case .failed = state { break }
-                    try? await Task.sleep(for: .milliseconds(200))
+            // Retry on top of the retries the services already do themselves, so
+            // the user rarely has to tap "Retry" (flaky networks drop big
+            // downloads often).
+            for attempt in 0 ..< 2 {
+                // Mirror the service's progress while `prepare()` runs. The
+                // outcome comes from `prepare()` itself, never from this poll —
+                // reading `loadState` can otherwise pick up the *previous*
+                // attempt's `.failed` before the new one has started and report
+                // a failure that isn't happening.
+                let poll = Task {
+                    while !Task.isCancelled {
+                        let state = await service.loadState
+                        if case .failed = state {} else { apply(state, at: index) }
+                        try? await Task.sleep(for: .milliseconds(200))
+                    }
                 }
-                _ = await prepare.value
-                let final = await service.loadState
-                apply(final, at: index)
-                if final.isReady { break }
-
-                if attempt < 2 {
-                    try? await Task.sleep(for: .seconds(2))
-                    items[index].state = .downloading(progress: 0)
+                do {
+                    try await service.prepare()
+                    poll.cancel()
+                    items[index].state = .ready
+                    break
+                } catch {
+                    poll.cancel()
+                    if attempt == 1 {
+                        items[index].state = .failed(error.localizedDescription)
+                    } else {
+                        items[index].state = .downloading(progress: 0)
+                        try? await Task.sleep(for: .seconds(2))
+                    }
                 }
             }
-            if allReady { Self.hasCompletedSetup = true }
+            Self.hasCompletedSetup = allReady
         }
     }
 
