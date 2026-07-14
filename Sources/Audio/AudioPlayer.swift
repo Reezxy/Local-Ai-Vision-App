@@ -12,8 +12,16 @@ actor AudioPlayer {
     private var pendingBuffers = 0
     private var idleContinuations: [CheckedContinuation<Void, Never>] = []
 
+    /// Start the engine ahead of the first sentence. `engine.start()` takes a
+    /// noticeable moment (it spins up the audio hardware), and paying that on the
+    /// first buffer delays the very thing we're trying to make instant.
+    func prewarm(sampleRate: Double = 24_000) {
+        try? configureIfNeeded(sampleRate: sampleRate)
+    }
+
     private func configureIfNeeded(sampleRate: Double) throws {
         guard !isConfigured else { return }
+        AudioSession.activate()
         engine.attach(playerNode)
         let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,

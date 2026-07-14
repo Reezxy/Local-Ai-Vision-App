@@ -19,6 +19,8 @@ actor KokoroTextToSpeechService: TextToSpeechService {
     private let player: AudioPlayer
     private var core: SynthCore?
     private var state: ModelLoadState = .notLoaded
+    /// Shared by concurrent `prepare()` callers so the model is only loaded once.
+    private var loadTask: Task<Void, Error>?
 
     /// `af_heart` is Kokoro's default English voice. See the repo's VOICES.md
     /// for the full list (af_*, am_*, bf_*, bm_* …).
@@ -30,7 +32,18 @@ actor KokoroTextToSpeechService: TextToSpeechService {
     var loadState: ModelLoadState { state }
 
     func prepare() async throws {
-        guard core == nil else { return }
+        if core != nil { return }
+        if let loadTask {
+            try await loadTask.value
+            return
+        }
+        let task = Task<Void, Error> { try await self.load() }
+        loadTask = task
+        defer { loadTask = nil }
+        try await task.value
+    }
+
+    private func load() async throws {
         do {
             let voiceFile = "\(voiceName).safetensors"
 
@@ -50,11 +63,21 @@ actor KokoroTextToSpeechService: TextToSpeechService {
             guard let voiceArray = try MLX.loadArrays(url: voiceURL).values.first else {
                 throw AIError.synthesisFailed
             }
-            core = SynthCore(
+            let core = SynthCore(
                 tts: KokoroTTS(modelPath: modelURL, g2p: .misaki),
                 voice: voiceArray,
                 player: player
             )
+
+            // Kokoro's first synthesis is far slower than the rest — it compiles
+            // the MLX graph and warms the G2P tables. Pay that here, during
+            // warm-up, instead of in the middle of the first answer where it
+            // shows up as a long silence before the voice starts. The audio is
+            // discarded, and the audio engine is started for the same reason.
+            core.warmUp()
+            await player.prewarm(sampleRate: Double(KokoroTTS.Constants.samplingRate))
+
+            self.core = core
             state = .ready
         } catch {
             state = .failed(error.localizedDescription)
@@ -97,11 +120,17 @@ actor KokoroTextToSpeechService: TextToSpeechService {
 
     private func setState(_ newState: ModelLoadState) { state = newState }
 
+    /// The voice file is as required as the weights — without it synthesis fails,
+    /// so a model-without-voice must not count as downloaded.
     func isDownloaded() async -> Bool {
-        await ModelDownloader.shared.exists(modelFilename)
+        let hasWeights = await ModelDownloader.shared.exists(modelFilename)
+        let hasVoice = await ModelDownloader.shared.exists("\(voiceName).safetensors")
+        return hasWeights && hasVoice
     }
 
     func deleteDownload() async {
+        loadTask?.cancel()
+        loadTask = nil
         core = nil
         state = .notLoaded
         await ModelDownloader.shared.delete(modelFilename)
@@ -126,6 +155,14 @@ private final class SynthCore: @unchecked Sendable {
         self.tts = tts
         self.voice = voice
         self.player = player
+    }
+
+    /// Run one throwaway synthesis so the expensive first-call work (graph
+    /// compilation, G2P warm-up) is done before the user asks anything.
+    func warmUp() {
+        lock.lock()
+        defer { lock.unlock() }
+        _ = try? tts.generateAudio(voice: voice, language: .enUS, text: "Ready.")
     }
 
     /// Synthesize `text` on the CALLING thread and queue the audio for gapless

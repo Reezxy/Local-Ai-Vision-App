@@ -61,8 +61,12 @@ final class VisionPipeline {
         guard !isModelLoading else { return }
         isModelLoading = true
         modelLoadError = nil
-        let vlm = self.vlm, stt = self.stt, tts = self.tts
+        let vlm = self.vlm, stt = self.stt, tts = self.tts, recorder = self.recorder
         Task {
+            // Arm the mic and the audio session now, so the first push-to-talk
+            // records from the very first syllable instead of spending its first
+            // moments setting up hardware.
+            await recorder.prewarm()
             if await vlm.loadState.isReady == false {
                 do {
                     try await vlm.prepare()
@@ -97,34 +101,104 @@ final class VisionPipeline {
 
     // MARK: Voice input path
 
+    /// The task that starts the recording. Kept apart from `currentTask` — both
+    /// used to go through `run()`, which cancels the previous task, so releasing
+    /// the button quickly cancelled the start before the recorder was running and
+    /// the whole take was lost ("nothing happens when I hold the mic").
+    private var recordingStart: Task<Void, Never>?
+
+    /// Live microphone loudness (0...1) while listening, for the on-screen
+    /// recording animation.
+    private(set) var micLevel: Double = 0
+    private var levelTask: Task<Void, Never>?
+
+    private func startMonitoringLevel() {
+        levelTask?.cancel()
+        let recorder = self.recorder
+        levelTask = Task {
+            while !Task.isCancelled {
+                guard let level = await recorder.currentLevel() else {
+                    micLevel = 0
+                    try? await Task.sleep(for: .milliseconds(50))
+                    continue
+                }
+                // Ease towards the new level so the bars breathe instead of
+                // flickering on every sample.
+                micLevel += (level - micLevel) * 0.5
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            micLevel = 0
+        }
+    }
+
+    private func stopMonitoringLevel() {
+        levelTask?.cancel()
+        levelTask = nil
+        micLevel = 0
+    }
+
     func startVoiceInput() {
         // The push-to-talk gesture fires onChanged repeatedly while the finger
         // moves — only the first call may start a recording, or it would be
         // restarted over and over and transcription would get an empty file.
         guard phase != .listening else { return }
+        print("[LocalVision] Mic pressed (phase: \(phase))")
+
+        // Whatever we were saying, stop: the mic is about to open and would
+        // otherwise record our own voice back into the question.
+        currentTask?.cancel()
+        speechTask?.cancel()
+        speechTask = nil
+
         phase = .listening // set synchronously so re-entrant gesture calls bail
-        run {
-            guard await self.recorder.requestPermission() else {
+        let recorder = self.recorder, tts = self.tts
+        recordingStart = Task {
+            await tts.stop()
+            guard await recorder.requestPermission() else {
+                print("[LocalVision] Microphone permission denied")
                 self.phase = .error("Microphone permission denied")
                 return
             }
-            _ = try? await self.recorder.startRecording()
+            do {
+                try await recorder.startRecording()
+                print("[LocalVision] Recording started")
+                self.startMonitoringLevel()
+            } catch {
+                // Silently swallowing this is what made a dead mic look like a
+                // hang — the UI sat in "listening" with nothing being recorded.
+                print("[LocalVision] Recording failed to start: \(error)")
+                self.phase = .error(error.localizedDescription)
+            }
         }
     }
 
     /// User released the talk button; transcribe then run the same handler.
     func finishVoiceInput() {
+        guard phase == .listening else { return }
+        let start = recordingStart
         run {
+            // Wait for the recording to have actually started before stopping it.
+            await start?.value
+            self.stopMonitoringLevel()
+            guard self.phase == .listening else { return } // start failed
+
             guard let url = await self.recorder.stopRecording() else {
-                self.phase = .idle
+                // A tap, not a question. Say so — silently dropping back to idle
+                // is indistinguishable from a broken mic button.
+                self.phase = .error("Hold the mic button while you speak")
+                self.scheduleIdle()
                 return
             }
             self.phase = .transcribing
             do {
                 let question = try await self.stt.transcribe(audioAt: url)
+                print("[LocalVision] Transcribed: \(question)")
+                try? FileManager.default.removeItem(at: url)
                 await self.handle(question: question)
             } catch {
-                self.phase = .error(error.localizedDescription)
+                print("[LocalVision] Transcription failed: \(error)")
+                self.phase = .error("Didn't catch that — try again")
+                self.scheduleIdle()
             }
         }
     }
@@ -157,13 +231,25 @@ final class VisionPipeline {
             // is still being written. Same thread + same GPU = no contention.
             let inline = await tts.inlineSynthesizer
 
+            // Speech now starts partway through generation, so the UI must stop
+            // claiming we're still "thinking" the moment the voice begins.
+            var onSentence: (@Sendable (String) -> Void)?
+            if let synthesize = inline {
+                onSentence = { @Sendable chunk in
+                    Task { @MainActor in
+                        if self.phase == .thinking { self.phase = .speaking }
+                    }
+                    synthesize(chunk)
+                }
+            }
+
             let answer = try await vlm.answer(
                 question: question,
                 about: frame,
                 onToken: { token in
                     Task { @MainActor in self.partialAnswer = token }
                 },
-                onSentence: inline
+                onSentence: onSentence
             )
             transcript.append(Interaction(role: .assistant, text: answer))
             partialAnswer = ""
@@ -184,6 +270,18 @@ final class VisionPipeline {
             phase = .error(error.localizedDescription)
         }
         scheduleClear()
+    }
+
+    /// Clear a transient message after a moment so the app doesn't sit in an
+    /// error state forever.
+    private var idleTask: Task<Void, Never>?
+    private func scheduleIdle() {
+        idleTask?.cancel()
+        idleTask = Task {
+            try? await Task.sleep(for: .seconds(2.5))
+            guard !Task.isCancelled else { return }
+            if case .error = self.phase { self.phase = .idle }
+        }
     }
 
     /// Fade the on-screen conversation out 6 seconds after speech finished.

@@ -52,7 +52,15 @@ struct RootView: View {
             VStack {
                 Spacer()
 
-                if pipeline.isModelLoading {
+                if pipeline.phase == .listening {
+                    ListeningIndicator(level: pipeline.micLevel)
+                        .padding(.bottom, 8)
+                        .transition(.opacity)
+                } else if pipeline.phase == .transcribing {
+                    ShimmerPill(text: "Transcribing…")
+                        .padding(.bottom, 8)
+                        .transition(.opacity)
+                } else if pipeline.isModelLoading {
                     ShimmerPill(text: "Loading model…")
                         .padding(.bottom, 8)
                         .transition(.opacity)
@@ -84,7 +92,9 @@ struct RootView: View {
                         inputFocused = false
                     },
                     onMicDown: { pipeline.startVoiceInput() },
-                    onMicUp: { pipeline.finishVoiceInput() }
+                    onMicUp: { pipeline.finishVoiceInput() },
+                    isListening: pipeline.phase == .listening,
+                    micLevel: pipeline.micLevel
                 )
                 .padding(.horizontal)
                 .padding(.bottom, 8)
@@ -201,6 +211,60 @@ private struct ModelErrorBadge: View {
     }
 }
 
+// MARK: - Listening indicator
+
+/// "Listening…" with live level bars. The bars are driven by the actual
+/// microphone level, so they are also the answer to "is it even recording?" —
+/// if they move, the mic is live.
+private struct ListeningIndicator: View {
+    let level: Double
+
+    private static let barCount = 5
+    /// Each bar reacts to a slightly different slice of the level, so the group
+    /// ripples rather than moving as one block.
+    private static let weights: [Double] = [0.55, 0.85, 1.0, 0.8, 0.5]
+
+    @State private var pulse = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            // Recording dot.
+            Circle()
+                .fill(.red)
+                .frame(width: 8, height: 8)
+                .scaleEffect(pulse ? 1.35 : 0.85)
+                .opacity(pulse ? 1 : 0.5)
+                .animation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true), value: pulse)
+
+            HStack(spacing: 3) {
+                ForEach(0 ..< Self.barCount, id: \.self) { index in
+                    Capsule()
+                        .fill(.white)
+                        .frame(width: 3, height: barHeight(index))
+                        .animation(.easeOut(duration: 0.12), value: level)
+                }
+            }
+            .frame(height: 22)
+
+            Text("Listening…")
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.black.opacity(0.55), in: Capsule())
+        .overlay(Capsule().stroke(.white.opacity(0.12), lineWidth: 1))
+        .onAppear { pulse = true }
+    }
+
+    private func barHeight(_ index: Int) -> CGFloat {
+        let minimum: Double = 4
+        let maximum: Double = 22
+        let scaled = minimum + (maximum - minimum) * level * Self.weights[index]
+        return CGFloat(min(max(scaled, minimum), maximum))
+    }
+}
+
 // MARK: - Input bar
 
 private struct InputBar: View {
@@ -209,6 +273,8 @@ private struct InputBar: View {
     let onSend: () -> Void
     let onMicDown: () -> Void
     let onMicUp: () -> Void
+    let isListening: Bool
+    let micLevel: Double
 
     var body: some View {
         HStack(spacing: 12) {
@@ -223,12 +289,34 @@ private struct InputBar: View {
                 .onSubmit(onSend)
 
             if text.isEmpty {
-                // Push-to-talk mic.
+                // Push-to-talk mic. While recording it turns red and grows a ring
+                // that rides the input level, so holding the button visibly does
+                // something the moment you press it.
                 Image(systemName: "mic.fill")
                     .font(.title2)
                     .foregroundStyle(.white)
                     .frame(width: 48, height: 48)
+                    .background {
+                        if isListening {
+                            Circle().fill(.red.opacity(0.85))
+                        }
+                    }
                     .glassCircle()
+                    .overlay {
+                        if isListening {
+                            Circle()
+                                .stroke(.red.opacity(0.6), lineWidth: 2)
+                                .scaleEffect(1 + 0.35 * micLevel)
+                                .opacity(1 - 0.5 * micLevel)
+                                .animation(.easeOut(duration: 0.12), value: micLevel)
+                        }
+                    }
+                    .scaleEffect(isListening ? 1.08 : 1)
+                    .animation(.spring(duration: 0.25), value: isListening)
+                    // Without this the touch target is the mic glyph itself, not
+                    // the button — a press slightly off the icon hits nothing and
+                    // the app looks dead.
+                    .contentShape(Circle())
                     .gesture(
                         DragGesture(minimumDistance: 0)
                             .onChanged { _ in onMicDown() }
